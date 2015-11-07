@@ -1,10 +1,11 @@
 <?php
 /**
  * netbeans(8.X)でリモートPHPUnitを実行する。
- * Win＋Vagrant＋IDPW認証前提
+ * Vagrant前提
  * 
  * ホスト側で以下が必要
  *   php + ssh2
+ * 
  */
 class NetBeansRemoteTestSuite
 {
@@ -137,7 +138,7 @@ class NetBeansRemoteTestSuite
         //ssh2モジュールがない
         if (!function_exists("ssh2_connect")) {
             throw new RuntimeException(
-                "ssh2を有効にしてください。"
+                "Please enable ssh2 module."
             );
         }
     }
@@ -150,6 +151,21 @@ class NetBeansRemoteTestSuite
     private function generateRemoteCommandFromNetBeans()
     {
         $res   = array();
+
+        //bootstrap
+        if (strlen($this->config->getGuestPhpUnitBootstrapPath()) > 0) {
+            $res[] = self::ARGS_BOOTSTRAP . " " . $this->config->getGuestPhpUnitBootstrapPath();
+        }
+        
+        //config
+        if (strlen($this->config->getGuestPhpUnitConfigPath()) > 0) {
+            $res[] = self::ARGS_CONFIGURATION . " " . $this->config->getGuestPhpUnitConfigPath();
+        }
+        
+        //include_path
+        if (strlen($this->config->getGuestPhpUnitIncludePath()) > 0) {
+            $res[] = self::ARGS_INCLUDE_PATH . " " . $this->config->getGuestPhpUnitIncludePath();
+        }
         
         $list  = array(
             self::ARGS_LOG_JUNIT,
@@ -176,21 +192,6 @@ class NetBeansRemoteTestSuite
             }
         }
         
-        //bootstrap
-        if (strlen($this->config->getGuestPhpUnitBootstrapPath()) > 0) {
-            $res[] = self::ARGS_BOOTSTRAP . " " . $this->config->getGuestPhpUnitBootstrapPath();
-        }
-        
-        //config
-        if (strlen($this->config->getGuestPhpUnitConfigPath()) > 0) {
-            $res[] = self::ARGS_CONFIGURATION . " " . $this->config->getGuestPhpUnitConfigPath();
-        }
-        
-        //include_path
-        if (strlen($this->config->getGuestPhpUnitIncludePath()) > 0) {
-            $res[] = self::ARGS_INCLUDE_PATH . " " . $this->config->getGuestPhpUnitIncludePath();
-        }
-        
         return $res;
     }
     
@@ -207,14 +208,14 @@ class NetBeansRemoteTestSuite
         // netbeansからのbootstrapは受け付けてない
         if (preg_match("/^". self::ARGS_BOOTSTRAP ."/", $arg)) {
             throw new RuntimeException(
-                "Error:bootstrapの指定は受け付けません。"
+                "Error: It does not support the specification of the bootstrap.\nPlease specify in this script."
             );
         }
         
         // netbeansからのconfigも受け付けない
         if (preg_match("/^". self::ARGS_CONFIGURATION ."/", $arg)) {
             throw new RuntimeException(
-                "Error:configの指定は受け付けません。"
+                "Error: It does not support the specification of the configuration.\nPlease specify in this script."
             );
         }
 
@@ -271,7 +272,7 @@ class NetBeansRemoteTestSuite
             
             if (!copy($arg, $dest)) {
                 throw new RuntimeException(
-                    "Error:NetBeansSuiteのコピーに失敗しました。 from[$arg] to[$dest]"
+                    "Error:failed to copy NetBeansSuite. from[$arg] to[$dest]"
                 );
             }
             
@@ -292,16 +293,16 @@ class NetBeansRemoteTestSuite
         $conn = ssh2_connect($ip, $port, array('hostkey' => 'ssh-rsa'));
         if (!$conn) {
             throw new RuntimeException(
-                "Error: 接続に失敗しました。 [$ip:$port]"
+                "Error: Connection failure to host. [$ip:$port]"
             );
         }
         
-        $id  = $this->config->getGuestLoginUserId();
-        $pw  = $this->config->getGuestLoginUserPassword();
+        $id = $this->config->getGuestLoginUserId();
+        $pw = $this->config->getGuestLoginUserPassword();
 
         if (!ssh2_auth_password($conn, $id, $pw)) {
             throw new RuntimeException(
-                "Error:認証に失敗しました。 [$id]"
+                "Error: Authentication failure to host. [$id]"
             );
         }
         
@@ -325,21 +326,20 @@ class NetBeansRemoteTestSuite
         $stream = ssh2_exec($this->conn, $command);
         $streamError = ssh2_fetch_stream($stream, SSH2_STREAM_STDERR);
 
-        //ストリームをブロックモードに
-        $blocking = 1;
-        stream_set_blocking($stream, $blocking);
-        stream_set_blocking($streamError, $blocking);
+        // Enable blocking for both streams
+        stream_set_blocking($stream, true);
+        stream_set_blocking($streamError, true);
         
         $res = stream_get_contents($stream);
         $resError = stream_get_contents($streamError);
 
         $this->showConsole("\n[result]\n$res");
         
-        //ストリームを閉じる
+        // Close the streams
         fclose($streamError);
         fclose($stream);
        
-        //error
+        // Output error
         if ($resError) {
             throw new RuntimeException($resError);
         }
@@ -352,24 +352,30 @@ class NetBeansRemoteTestSuite
      */
     private function disposeResult()
     {
-        $config  = $this->config;
-
+        $config = $this->config;
         $dispose = function ($target) use ($config) {
             $tmp = explode(" ", $target);
             $file = trim($tmp[1]);
             $from = $config->getHostSyncedWorkDir() . "/" . basename($file); 
 
-            if (!rename($from, $file)) {
+            $data = file_get_contents($from);
+            unlink($from);
+            $data = str_replace($config->getGuestSyncedDir(), $config->getHostSyncedDir(), $data);
+
+            if (!file_put_contents($file, $data)) {
                 throw new RuntimeException(
-                    "Error:結果ファイルの移動に失敗しました。 src[$from] dest[$file]"
+                    "Error:failed to move files. src[$from] dest[$file]"
                 );
             }
         };
-
+        
+        //log-junitの結果
         if (isset($this->replacedResultList[self::ARGS_LOG_JUNIT])) {
             $dispose($this->replacedResultList[self::ARGS_LOG_JUNIT]);
         }
         
+
+        //coverage-cloverの結果
         if (isset($this->replacedResultList[self::ARGS_COVERAGE_CLOVER])) {
             $dispose($this->replacedResultList[self::ARGS_COVERAGE_CLOVER]);
         }
